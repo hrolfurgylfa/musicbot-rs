@@ -4,9 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+tokio = { version = "1.40.0", features = ["full"] }
 reqwest = "0.11"
-serenity = { version = "0.12.2", features = ["client", "standard_framework", "voice"] }
+tracing-subscriber = "0.3.18"
+
+serde = { version = "1.0" }
+toml = "0.8"
+
+serenity = { version = "0.12", features = ["client", "standard_framework", "voice"] }
+poise = { version = "0.6" }
 songbird = { version = "0.4", features = ["builtin-queue"] }
 symphonia = { version = "0.5", features = ["aac", "mp3", "isomp4", "alac"] }
-tokio = { version = "1.40.0", features = ["full"] }
-tracing-subscriber = "0.3.18"
