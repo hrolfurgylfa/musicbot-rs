@@ -33,16 +33,9 @@ pub async fn play(
     ctx: Context<'_>,
     #[description = "What to play"] play: String,
 ) -> Result<(), Error> {
-    let maybe_guild_id = match ctx.guild() {
-        Some(a) => Some(a.id),
-        None => None,
-    };
-    let guild_id = match maybe_guild_id {
-        Some(t) => t,
-        None => {
-            ctx.say("This command is only supported in guilds.").await?;
-            return Ok(());
-        }
+    let Some(guild_id) = ctx.guild().map(|g| g.id) else {
+        ctx.say("This command is only supported in guilds.").await?;
+        return Ok(());
     };
     let res = ctx.data().add_song(guild_id, ctx, play).await;
     match res {
