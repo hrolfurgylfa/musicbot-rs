@@ -1,10 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
-use serenity::{async_trait, futures::lock::Mutex};
-// This trait adds the `register_songbird` and `register_songbird_with` methods
-// to the client builder below, making it easy to install this voice client.
-// The voice client can be retrieved in any command using `songbird::get(ctx).await`.
-use songbird::{Event, EventContext, EventHandler as VoiceEventHandler, SerenityInit, Songbird};
+use queue::Data as QueueData;
+use songbird::SerenityInit;
 
 // YtDl requests need an HTTP client to operate -- we'll create and store our own.
 use reqwest::Client as HttpClient;
@@ -16,44 +13,13 @@ use config::load_config;
 
 mod commands;
 
+mod events;
+
+mod queue;
+
+type Data = Arc<QueueData>;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
-
-#[derive(Debug)]
-struct Data {
-    // queues: Mutex<HashMap<u32, Queue>>,
-    songbird: Arc<Songbird>,
-}
-
-#[derive(Debug)]
-struct Queue {
-    songs: Vec<Song>,
-}
-
-#[derive(Debug)]
-struct Song {
-    name: String,
-    url: String,
-}
-
-struct TrackErrorNotifier;
-
-#[async_trait]
-impl VoiceEventHandler for TrackErrorNotifier {
-    async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
-        if let EventContext::Track(track_list) = ctx {
-            for (state, handle) in *track_list {
-                println!(
-                    "Track {:?} encountered an error: {:?}",
-                    handle.uuid(),
-                    state.playing
-                );
-            }
-        }
-
-        None
-    }
-}
 
 struct HttpKey;
 
@@ -61,7 +27,12 @@ impl TypeMapKey for HttpKey {
     type Value = HttpClient;
 }
 
-struct Handler;
+async fn get_songbird_manager(ctx: Context<'_>) -> Arc<songbird::Songbird> {
+    songbird::get(ctx.serenity_context())
+        .await
+        .expect("Songbird Voice client placed in at initialisation.")
+        .clone()
+}
 
 async fn on_error(error: poise::FrameworkError<'_, Data, Error>) {
     // This is our custom error handler
@@ -91,6 +62,11 @@ async fn main() {
             commands::join(),
             commands::leave(),
             commands::play(),
+            commands::queue(),
+            commands::skip_to(),
+            commands::skip(),
+            commands::loop_song(),
+            commands::loop_queue(),
         ],
         prefix_options: poise::PrefixFrameworkOptions {
             prefix: Some("=".to_owned()),
@@ -101,18 +77,12 @@ async fn main() {
         ..Default::default()
     };
 
-    let songbird = songbird::Songbird::serenity();
-    let songbird_clone = songbird.clone();
     let framework = poise::Framework::builder()
         .setup(move |ctx, ready, framework| {
             Box::pin(async move {
                 println!("Logged in as {}", ready.user.name);
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
-                // songbird_clone.initialise_client_data(1, ready.user.id);
-                Ok(Data {
-                    // queues: Mutex::new(HashMap::new()),
-                    songbird: songbird_clone,
-                })
+                Ok(Data::default())
             })
         })
         .options(options)
@@ -121,9 +91,9 @@ async fn main() {
     let intents = GatewayIntents::non_privileged() | GatewayIntents::MESSAGE_CONTENT;
 
     let client = serenity::client::Client::builder(&config.token, intents)
-        .voice_manager_arc(songbird)
         .framework(framework)
         .type_map_insert::<HttpKey>(HttpClient::new())
+        .register_songbird()
         .await;
 
     client.unwrap().start().await.unwrap()

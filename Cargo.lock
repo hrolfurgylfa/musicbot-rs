@@ -1154,6 +1154,7 @@ dependencies = [
 name = "music_bot"
 version = "0.1.0"
 dependencies = [
+ "parking_lot",
  "poise",
  "reqwest",
  "serde",
