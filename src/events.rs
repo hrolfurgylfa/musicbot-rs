@@ -1,9 +1,5 @@
-use std::sync::Arc;
-
-use serenity::{all::GuildId, async_trait};
-use songbird::{Event, EventContext, EventHandler as VoiceEventHandler, Songbird};
-
-use crate::Data;
+use serenity::async_trait;
+use songbird::{Event, EventContext, EventHandler as VoiceEventHandler};
 
 pub struct TrackErrorNotifier;
 
@@ -20,37 +16,6 @@ impl VoiceEventHandler for TrackErrorNotifier {
                 );
             }
         }
-
-        None
-    }
-}
-
-pub struct TrackStopHandler {
-    songbird: Arc<Songbird>,
-    data: Data,
-    guild_id: GuildId,
-}
-
-impl TrackStopHandler {
-    pub fn new(songbird: Arc<Songbird>, data: Data, guild_id: GuildId) -> TrackStopHandler {
-        TrackStopHandler {
-            songbird,
-            data,
-            guild_id,
-        }
-    }
-}
-
-#[async_trait]
-impl VoiceEventHandler for TrackStopHandler {
-    async fn act(&self, _: &EventContext<'_>) -> Option<Event> {
-        let data = self.data.clone();
-        let songbird = self.songbird.clone();
-        let guild_id = self.guild_id;
-        match data.next_song(songbird, guild_id, false).await {
-            Ok(_) => (),
-            Err(e) => println!("Error switching to next song: {}", e),
-        };
 
         None
     }

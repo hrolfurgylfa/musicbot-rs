@@ -1,12 +1,10 @@
 use std::sync::Arc;
 
-use queue::Data as QueueData;
 use songbird::SerenityInit;
 
-// YtDl requests need an HTTP client to operate -- we'll create and store our own.
 use reqwest::Client as HttpClient;
 
-use serenity::prelude::{GatewayIntents, TypeMapKey};
+use serenity::prelude::GatewayIntents;
 
 mod config;
 use config::load_config;
@@ -15,17 +13,13 @@ mod commands;
 
 mod events;
 
-mod queue;
+mod typekeys;
+use typekeys::HttpKey;
 
-type Data = Arc<QueueData>;
+#[derive(Clone, Default)]
+struct Data;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
-
-struct HttpKey;
-
-impl TypeMapKey for HttpKey {
-    type Value = HttpClient;
-}
 
 async fn get_songbird_manager(ctx: Context<'_>) -> Arc<songbird::Songbird> {
     songbird::get(ctx.serenity_context())
@@ -63,10 +57,7 @@ async fn main() {
             commands::leave(),
             commands::play(),
             commands::queue(),
-            commands::skip_to(),
             commands::skip(),
-            commands::loop_song(),
-            commands::loop_queue(),
         ],
         prefix_options: poise::PrefixFrameworkOptions {
             prefix: Some("=".to_owned()),
@@ -82,7 +73,7 @@ async fn main() {
             Box::pin(async move {
                 println!("Logged in as {}", ready.user.name);
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
-                Ok(Data::default())
+                Ok(Data)
             })
         })
         .options(options)

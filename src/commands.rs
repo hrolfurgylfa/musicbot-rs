@@ -1,9 +1,10 @@
-use songbird::TrackEvent;
+use serenity::futures::future::join_all;
+use songbird::{input::YoutubeDl, TrackEvent};
 
 use crate::{
-    events::{TrackErrorNotifier, TrackStopHandler},
+    events::TrackErrorNotifier,
     get_songbird_manager,
-    queue::AddSongResult,
+    typekeys::{HttpKey, SongTitleKey, SongUrlKey},
     Context, Error,
 };
 
@@ -31,22 +32,51 @@ pub async fn help(
 #[poise::command(prefix_command, slash_command)]
 pub async fn play(
     ctx: Context<'_>,
-    #[description = "What to play"] play: String,
+    #[description = "What to play"] url: String,
 ) -> Result<(), Error> {
     let Some(guild_id) = ctx.guild().map(|g| g.id) else {
         ctx.say("This command is only supported in guilds.").await?;
         return Ok(());
     };
-    let res = ctx.data().add_song(guild_id, ctx, play).await;
-    match res {
-        Ok(good_res) => match good_res {
-            AddSongResult::NowPlaying(s) => ctx.say(format!("Playing \"{}\"", s.name)).await?,
-            AddSongResult::AddedToQueue(s) => {
-                ctx.say(format!("\"{}\" added to queue.", s.name)).await?
-            }
-        },
-        Err(msg) => ctx.say(msg).await?,
+
+    // Some prepwork before gathering the data
+    let do_search = !url.starts_with("http");
+    let http_client = {
+        let data = ctx.serenity_context().data.read().await;
+        data.get::<HttpKey>()
+            .cloned()
+            .expect("Guaranteed to exist in the typemap.")
     };
+
+    // Fetch data about the selected video
+    let mut src = if do_search {
+        YoutubeDl::new_search(http_client, url.clone())
+    } else {
+        YoutubeDl::new(http_client, url.clone())
+    };
+    let mut aux_multiple = src
+        .search(Some(1))
+        .await
+        .expect("Failed to get info about song.");
+    if aux_multiple.len() == 0 {}
+    let aux = aux_multiple.swap_remove(0);
+    let title = aux.title.unwrap_or_else(|| "Unknown".to_owned());
+
+    // Add the song to the queue
+    {
+        let songbird = get_songbird_manager(ctx).await;
+        let Some(driver_lock) = songbird.get(guild_id) else {
+            ctx.say("Not in voice channel, can't play.").await?;
+            return Ok(());
+        };
+        let mut driver = driver_lock.lock().await;
+        let handle = driver.enqueue(src.into()).await;
+        let mut typemap = handle.typemap().write().await;
+        typemap.insert::<SongTitleKey>(title.clone());
+        typemap.insert::<SongUrlKey>(url);
+    }
+
+    ctx.say(format!("\"{}\" added to queue.", title)).await?;
 
     Ok(())
 }
@@ -85,10 +115,6 @@ pub async fn join(
             // Attach an event handler to see notifications of all track errors.
             let mut handler = handler_lock.lock().await;
             handler.add_global_event(TrackEvent::Error.into(), TrackErrorNotifier);
-            handler.add_global_event(
-                TrackEvent::End.into(),
-                TrackStopHandler::new(manager.clone(), ctx.data().clone(), guild_id),
-            );
         }
         Err(e) => {
             println!("Faield to join channel: {:?}", e);
@@ -97,7 +123,6 @@ pub async fn join(
         }
     }
 
-    ctx.data().reset_queue(guild_id);
     ctx.say("Ready to play").await?;
     Ok(())
 }
@@ -118,7 +143,6 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
             ctx.say(format!("Failed: {:?}", e)).await?;
         }
 
-        ctx.data().reset_queue(guild_id);
         ctx.say("Left voice channel").await?;
     } else {
         ctx.say("Not in a voice channel").await?;
@@ -134,47 +158,39 @@ pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
         ctx.say("This command is only supported in guilds.").await?;
         return Ok(());
     };
-    let maybe_queue = ctx.data().get_queue(guild_id);
-    if let Some(queue) = maybe_queue {
-        let mut queue_str = "## Queue:\n```\n".to_owned();
-        let current_id = queue.current.map(|q| q.index);
-        for (i, song) in queue.songs.into_iter().enumerate() {
-            if Some(i) == current_id {
-                queue_str += &format!(
-                    "{}. {} - {} (currently playing)\n",
-                    i + 1,
-                    song.name,
-                    song.url
-                );
-            } else {
-                queue_str += &format!("{}. {} - {}\n", i + 1, song.name, song.url);
-            }
-        }
-        queue_str += "```";
-        ctx.say(queue_str).await?;
-    } else {
-        ctx.say("The queue is empty.").await?;
-    }
 
-    Ok(())
-}
-
-/// Skip to a specific song in the queue
-#[poise::command(prefix_command, slash_command)]
-pub async fn skip_to(
-    ctx: Context<'_>,
-    #[description = "Index to skip to"] index: usize,
-) -> Result<(), Error> {
-    let Some(guild_id) = ctx.guild().map(|g| g.id) else {
-        ctx.say("This command is only supported in guilds.").await?;
+    let songbird = get_songbird_manager(ctx).await;
+    let Some(driver_lock) = songbird.get(guild_id) else {
+        ctx.say("Not in a voice channel, no queue to show.").await?;
         return Ok(());
     };
-
-    let res = ctx.data().play_index(guild_id, ctx, index - 1).await;
-    match res {
-        Ok(song) => ctx.say(format!("Skipping to \"{}\"", song.name)).await?,
-        Err(err) => ctx.say(err).await?,
-    };
+    let driver = driver_lock.lock().await;
+    if driver.queue().is_empty() {
+        ctx.say("Queue is empty.").await?;
+        return Ok(());
+    }
+    let current_uuid = driver.queue().current().map(|h| h.uuid());
+    let queue = driver.queue().current_queue();
+    let lines = queue.into_iter().enumerate().map(|(i, handle)| async move {
+        let typemap = handle.typemap().read().await;
+        let name = typemap
+            .get::<SongTitleKey>()
+            .map(|s| s.as_str())
+            .unwrap_or("Unknown")
+            .to_owned();
+        let url = typemap
+            .get::<SongUrlKey>()
+            .map(|s| s.as_str())
+            .unwrap_or("Unknown")
+            .to_owned();
+        if Some(handle.uuid()) == current_uuid {
+            format!("{}. {} - {} (currently playing)", i + 1, name, url)
+        } else {
+            format!("{}. {} - {}", i + 1, name, url)
+        }
+    });
+    let output = join_all(lines).await.join("\n");
+    ctx.say(format!("## Queue:\n```\n{}\n```", output)).await?;
 
     Ok(())
 }
@@ -187,45 +203,14 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     };
 
-    let res = ctx.data().play_index(guild_id, ctx, index - 1).await;
-    match res {
-        Ok(song) => ctx.say(format!("Skipping to \"{}\"", song.name)).await?,
-        Err(err) => ctx.say(err).await?,
-    };
-
-    Ok(())
-}
-
-/// Loop on the current song forever
-#[poise::command(prefix_command, slash_command, rename = "loop")]
-pub async fn loop_song(ctx: Context<'_>) -> Result<(), Error> {
-    let Some(guild_id) = ctx.guild().map(|g| g.id) else {
-        ctx.say("This command is only supported in guilds.").await?;
+    let songbird = get_songbird_manager(ctx).await;
+    let Some(driver_lock) = songbird.get(guild_id) else {
+        ctx.say("No playing anything, can't skip.").await?;
         return Ok(());
     };
-    let loop_ = ctx.data().set_loop_song(guild_id);
-    if loop_ {
-        ctx.say("Looping of the current song turned on.").await?;
-    } else {
-        ctx.say("Looping of the current song turned off.").await?;
-    }
-
-    Ok(())
-}
-
-/// Loop the queue when it finishes
-#[poise::command(prefix_command, slash_command)]
-pub async fn loop_queue(ctx: Context<'_>) -> Result<(), Error> {
-    let Some(guild_id) = ctx.guild().map(|g| g.id) else {
-        ctx.say("This command is only supported in guilds.").await?;
-        return Ok(());
-    };
-    let loop_ = ctx.data().set_loop_queue(guild_id);
-    if loop_ {
-        ctx.say("Looping of the queue turned on.").await?;
-    } else {
-        ctx.say("Looping of the queue turned off.").await?;
-    }
+    let driver = driver_lock.lock().await;
+    driver.queue().skip()?;
+    ctx.say("Skipping to the next song.").await?;
 
     Ok(())
 }
