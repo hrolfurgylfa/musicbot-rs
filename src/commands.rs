@@ -100,7 +100,6 @@ pub async fn join(
         (guild.id, channel_id)
     };
 
-    println!("Hello 0");
     let connect_to = match channel_id {
         Some(channel) => channel,
         None => {
