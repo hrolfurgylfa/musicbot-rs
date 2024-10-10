@@ -1,6 +1,8 @@
 use serenity::futures::future::join_all;
 use songbird::{input::YoutubeDl, TrackEvent};
 
+use tracing::instrument;
+
 use crate::{
     events::TrackErrorNotifier,
     get_songbird_manager,
@@ -9,6 +11,7 @@ use crate::{
 };
 
 /// Show this help menu
+#[instrument]
 #[poise::command(prefix_command, slash_command)]
 pub async fn help(
     ctx: Context<'_>,
@@ -29,6 +32,7 @@ pub async fn help(
 }
 
 /// Play a song or search YouTube for a song
+#[instrument]
 #[poise::command(prefix_command, slash_command)]
 pub async fn play(
     ctx: Context<'_>,
@@ -82,6 +86,7 @@ pub async fn play(
 }
 
 /// Join a voice channel
+#[instrument]
 #[poise::command(prefix_command, aliases("votes"), slash_command)]
 pub async fn join(
     ctx: Context<'_>,
@@ -127,6 +132,7 @@ pub async fn join(
 }
 
 /// Leave the current voice channel
+#[instrument]
 #[poise::command(prefix_command, slash_command)]
 pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
     let Some(guild_id) = ctx.guild().map(|g| g.id) else {
@@ -151,6 +157,7 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
 }
 
 /// Show the current queue
+#[instrument]
 #[poise::command(prefix_command, slash_command)]
 pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
     let Some(guild_id) = ctx.guild().map(|g| g.id) else {
@@ -195,6 +202,7 @@ pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
 }
 
 /// Skip over the current song
+#[instrument]
 #[poise::command(prefix_command, slash_command)]
 pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
     let Some(guild_id) = ctx.guild().map(|g| g.id) else {
