@@ -8,7 +8,6 @@ use tracing::Level;
 use tracing::Subscriber;
 use tracing_subscriber::Layer as TracingLayer;
 
-use crate::config::Config;
 use crate::trimmed_embed::TrimmedEmbed;
 
 use super::visitor;
@@ -21,12 +20,12 @@ pub struct Layer {
 }
 
 impl Layer {
-    pub fn build(config: Config, http: Http) -> Layer {
+    pub fn build(error_webhook: Option<String>, http: Http) -> Layer {
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<Msg>(50);
         tokio::spawn(async move {
             // Load the webhook
-            let maybe_webhook = match &config.error_webhook {
-                Some(url) => match serenity::model::webhook::Webhook::from_url(&http, url).await {
+            let maybe_webhook = match error_webhook {
+                Some(url) => match serenity::model::webhook::Webhook::from_url(&http, &url).await {
                     Ok(webhook) => Some(webhook),
                     Err(e) => {
                         println!("ERROR: Failed to initialize debug webhook: {:?}", e);

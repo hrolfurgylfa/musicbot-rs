@@ -1,18 +1,20 @@
-use serenity::futures::future::join_all;
+use std::time::Duration;
+
 use songbird::{input::YoutubeDl, TrackEvent};
 
-use tracing::instrument;
+use tracing::{error, instrument};
 
 use crate::{
-    events::TrackErrorNotifier,
+    events::{TrackEndNotifier, TrackErrorNotifier},
     get_songbird_manager,
-    typekeys::{HttpKey, SongTitleKey, SongUrlKey},
+    playlist_info::{get_server_info, send_playlist_info, update_queue_messsage},
+    typekeys::{HttpKey, SongLengthKey, SongTitleKey, SongUrlKey},
     Context, Error,
 };
 
-/// Show this help menu
+/// Show the help menu
 #[instrument]
-#[poise::command(prefix_command, slash_command)]
+#[poise::command(prefix_command, slash_command, guild_only)]
 pub async fn help(
     ctx: Context<'_>,
     #[description = "Specific command to show help about"]
@@ -33,10 +35,10 @@ pub async fn help(
 
 /// Play a song or search YouTube for a song
 #[instrument]
-#[poise::command(prefix_command, slash_command)]
+#[poise::command(prefix_command, slash_command, guild_only)]
 pub async fn play(
     ctx: Context<'_>,
-    #[description = "What to play"] url: String,
+    #[description = "What to play"] play: String,
 ) -> Result<(), Error> {
     let Some(guild_id) = ctx.guild().map(|g| g.id) else {
         ctx.say("This command is only supported in guilds.").await?;
@@ -44,7 +46,7 @@ pub async fn play(
     };
 
     // Some prepwork before gathering the data
-    let do_search = !url.starts_with("http");
+    let do_search = !play.starts_with("http");
     let http_client = {
         let data = ctx.serenity_context().data.read().await;
         data.get::<HttpKey>()
@@ -54,9 +56,9 @@ pub async fn play(
 
     // Fetch data about the selected video
     let mut src = if do_search {
-        YoutubeDl::new_search(http_client, url.clone())
+        YoutubeDl::new_search(http_client, play.clone())
     } else {
-        YoutubeDl::new(http_client, url.clone())
+        YoutubeDl::new(http_client, play.clone())
     };
     let mut aux_multiple = src
         .search(Some(1))
@@ -65,29 +67,37 @@ pub async fn play(
     if aux_multiple.len() == 0 {}
     let aux = aux_multiple.swap_remove(0);
     let title = aux.title.unwrap_or_else(|| "Unknown".to_owned());
+    let duration = aux.duration.unwrap_or(Duration::ZERO);
 
     // Add the song to the queue
-    {
+    let handle = {
         let songbird = get_songbird_manager(ctx).await;
         let Some(driver_lock) = songbird.get(guild_id) else {
             ctx.say("Not in voice channel, can't play.").await?;
             return Ok(());
         };
         let mut driver = driver_lock.lock().await;
-        let handle = driver.enqueue(src.into()).await;
+        driver.enqueue(src.into()).await
+    };
+
+    // Add info about the song to the queue
+    {
         let mut typemap = handle.typemap().write().await;
         typemap.insert::<SongTitleKey>(title.clone());
-        typemap.insert::<SongUrlKey>(url);
+        typemap.insert::<SongLengthKey>(duration);
+        if let Some(url) = aux.source_url {
+            typemap.insert::<SongUrlKey>(url);
+        }
     }
 
     ctx.say(format!("\"{}\" added to queue.", title)).await?;
 
-    Ok(())
+    send_playlist_info(ctx, guild_id).await
 }
 
 /// Join a voice channel
 #[instrument]
-#[poise::command(prefix_command, aliases("votes"), slash_command)]
+#[poise::command(prefix_command, slash_command, guild_only)]
 pub async fn join(
     ctx: Context<'_>,
     // #[description = "Choice to retrieve votes for"] voice_channel: Option<VoiceState>,
@@ -119,9 +129,13 @@ pub async fn join(
             // Attach an event handler to see notifications of all track errors.
             let mut handler = handler_lock.lock().await;
             handler.add_global_event(TrackEvent::Error.into(), TrackErrorNotifier);
+            handler.add_global_event(
+                TrackEvent::End.into(),
+                TrackEndNotifier::new(ctx.data().clone(), guild_id),
+            );
         }
         Err(e) => {
-            println!("Faield to join channel: {:?}", e);
+            error!("Faield to join channel: {:?}", e);
             ctx.say("Failed to join channel.").await?;
             return Err(Box::new(e));
         }
@@ -133,7 +147,7 @@ pub async fn join(
 
 /// Leave the current voice channel
 #[instrument]
-#[poise::command(prefix_command, slash_command)]
+#[poise::command(prefix_command, slash_command, guild_only)]
 pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
     let Some(guild_id) = ctx.guild().map(|g| g.id) else {
         ctx.say("This command is only supported in guilds.").await?;
@@ -149,6 +163,20 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
         }
 
         ctx.say("Left voice channel").await?;
+
+        // Unset the update, since the bot is no longer in the VC
+        let prev_status_message_loc = {
+            let server_info_lock = get_server_info(ctx.data().clone(), guild_id).await;
+            let mut server_info = server_info_lock.lock();
+            let prev = server_info.status_message;
+            server_info.status_message = None;
+            prev
+        };
+
+        // Do one final update to show that the queue is now empty
+        if let Some(loc) = prev_status_message_loc {
+            update_queue_messsage(ctx.data().clone(), manager, &(&ctx).into(), guild_id, loc).await;
+        }
     } else {
         ctx.say("Not in a voice channel").await?;
     }
@@ -158,52 +186,19 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
 
 /// Show the current queue
 #[instrument]
-#[poise::command(prefix_command, slash_command)]
+#[poise::command(prefix_command, slash_command, guild_only)]
 pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
     let Some(guild_id) = ctx.guild().map(|g| g.id) else {
         ctx.say("This command is only supported in guilds.").await?;
         return Ok(());
     };
 
-    let songbird = get_songbird_manager(ctx).await;
-    let Some(driver_lock) = songbird.get(guild_id) else {
-        ctx.say("Not in a voice channel, no queue to show.").await?;
-        return Ok(());
-    };
-    let driver = driver_lock.lock().await;
-    if driver.queue().is_empty() {
-        ctx.say("Queue is empty.").await?;
-        return Ok(());
-    }
-    let current_uuid = driver.queue().current().map(|h| h.uuid());
-    let queue = driver.queue().current_queue();
-    let lines = queue.into_iter().enumerate().map(|(i, handle)| async move {
-        let typemap = handle.typemap().read().await;
-        let name = typemap
-            .get::<SongTitleKey>()
-            .map(|s| s.as_str())
-            .unwrap_or("Unknown")
-            .to_owned();
-        let url = typemap
-            .get::<SongUrlKey>()
-            .map(|s| s.as_str())
-            .unwrap_or("Unknown")
-            .to_owned();
-        if Some(handle.uuid()) == current_uuid {
-            format!("{}. {} - {} (currently playing)", i + 1, name, url)
-        } else {
-            format!("{}. {} - {}", i + 1, name, url)
-        }
-    });
-    let output = join_all(lines).await.join("\n");
-    ctx.say(format!("## Queue:\n```\n{}\n```", output)).await?;
-
-    Ok(())
+    send_playlist_info(ctx, guild_id).await
 }
 
 /// Skip over the current song
 #[instrument]
-#[poise::command(prefix_command, slash_command)]
+#[poise::command(prefix_command, slash_command, guild_only)]
 pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
     let Some(guild_id) = ctx.guild().map(|g| g.id) else {
         ctx.say("This command is only supported in guilds.").await?;
@@ -219,5 +214,5 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
     driver.queue().skip()?;
     ctx.say("Skipping to the next song.").await?;
 
-    Ok(())
+    send_playlist_info(ctx, guild_id).await
 }
