@@ -1,6 +1,6 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
-use songbird::{input::YoutubeDl, TrackEvent};
+use songbird::{input::YoutubeDl, tracks::Track, TrackEvent};
 
 use tracing::{error, instrument};
 
@@ -8,8 +8,8 @@ use crate::{
     events::{TrackEndNotifier, TrackErrorNotifier},
     get_songbird_manager,
     playlist_info::{get_server_info, send_playlist_info, update_queue_messsage},
-    typekeys::{HttpKey, SongLengthKey, SongTitleKey, SongUrlKey},
-    Context, Error,
+    typekeys::HttpKey,
+    Context, Error, TrackData,
 };
 
 /// Show the help menu
@@ -63,32 +63,31 @@ pub async fn play(
     let mut aux_multiple = src
         .search(Some(1))
         .await
-        .expect("Failed to get info about song.");
+        .expect("Failed to get info about song.")
+        .collect::<Vec<_>>();
     if aux_multiple.len() == 0 {}
     let aux = aux_multiple.swap_remove(0);
     let title = aux.title.unwrap_or_else(|| "Unknown".to_owned());
     let duration = aux.duration.unwrap_or(Duration::ZERO);
 
     // Add the song to the queue
-    let handle = {
+    {
         let songbird = get_songbird_manager(ctx).await;
         let Some(driver_lock) = songbird.get(guild_id) else {
             ctx.say("Not in voice channel, can't play.").await?;
             return Ok(());
         };
         let mut driver = driver_lock.lock().await;
-        driver.enqueue(src.into()).await
+        let track = Track::new_with_data(
+            src.into(),
+            Arc::new(TrackData {
+                title: title.clone(),
+                url: aux.source_url,
+                duration,
+            }),
+        );
+        driver.enqueue(track).await;
     };
-
-    // Add info about the song to the queue
-    {
-        let mut typemap = handle.typemap().write().await;
-        typemap.insert::<SongTitleKey>(title.clone());
-        typemap.insert::<SongLengthKey>(duration);
-        if let Some(url) = aux.source_url {
-            typemap.insert::<SongUrlKey>(url);
-        }
-    }
 
     ctx.say(format!("\"{}\" added to queue.", title)).await?;
 

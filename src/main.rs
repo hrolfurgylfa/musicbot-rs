@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, VecDeque},
     fmt::Write,
     sync::Arc,
+    time::Duration,
 };
 
 use parking_lot::{Mutex, RwLock};
@@ -37,6 +38,13 @@ mod serenity_query;
 
 mod deadlock_detection;
 use deadlock_detection::start_deadlock_detection;
+
+#[derive(Debug, Clone)]
+struct TrackData {
+    title: String,
+    url: Option<String>,
+    duration: Duration,
+}
 
 #[derive(Debug, Clone)]
 struct Song {
@@ -126,7 +134,7 @@ async fn main() {
         .with(
             tracing_subscriber::fmt::Layer::default()
                 .with_writer(std::io::stdout)
-                .with_filter(EnvFilter::new("info,music_bot=debug")),
+                .with_filter(EnvFilter::new("info,music_bot=debug,songbird=trace")),
         )
         .with(console_subscriber::spawn())
         .with(tracing_webhook::Layer::build(config.error_webhook, http));

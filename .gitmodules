@@ -1,4 +1,4 @@
 [submodule "vendor/songbird"]
 	path = vendor/songbird
 	url = https://github.com/serenity-rs/songbird.git
-    branch = main
+    branch = next

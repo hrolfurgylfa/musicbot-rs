@@ -12,12 +12,8 @@ use tokio::time::{self, Instant};
 use tracing::{instrument, warn};
 
 use crate::serenity_query::SerenityQuery;
-use crate::MsgLocation;
-use crate::{
-    get_songbird_manager,
-    typekeys::{SongLengthKey, SongTitleKey, SongUrlKey},
-    Context, Data, Error, ServerInfo, Song,
-};
+use crate::{get_songbird_manager, Context, Data, Error, ServerInfo, Song};
+use crate::{MsgLocation, TrackData};
 
 pub async fn get_server_info(data: Arc<Data>, guild_id: GuildId) -> Arc<Mutex<ServerInfo>> {
     let map = data.server_info.read();
@@ -80,28 +76,20 @@ async fn build_now_playing(songbird: Arc<Songbird>, guild_id: GuildId) -> String
 
     let mut str = "### Now Playing\n".to_owned();
     {
-        let current_typemap = current.typemap().read().await;
-        let title = current_typemap
-            .get::<SongTitleKey>()
-            .map(clean_song_title)
-            .unwrap_or_else(|| "Unknown".to_owned());
-        let url = current_typemap.get::<SongUrlKey>();
-        let length = format_duration(
-            current_typemap
-                .get::<SongLengthKey>()
-                .map(|d| *d)
-                .unwrap_or(Duration::ZERO),
-        );
-        let state = current
-            .get_info()
-            .await
-            .expect("Failed to get track state.");
-        let pos = format_duration(state.position);
+        let data = current.data::<TrackData>();
+        let length = format_duration(data.duration);
+        let pos = {
+            let state = current
+                .get_info()
+                .await
+                .expect("Failed to get track state.");
+            format_duration(state.position)
+        };
 
-        if let Some(url) = url {
-            write!(str, "[{}]({})\n[ {} / {} ]\n", title, url, pos, length).unwrap();
+        if let Some(url) = &data.url {
+            write!(str, "[{}]({})\n[ {} / {} ]\n", data.title, url, pos, length).unwrap();
         } else {
-            write!(str, "{}\n[ {} / {} ]\n", title, pos, length).unwrap();
+            write!(str, "{}\n[ {} / {} ]\n", data.title, pos, length).unwrap();
         }
     }
 
@@ -115,17 +103,12 @@ async fn build_now_playing(songbird: Arc<Songbird>, guild_id: GuildId) -> String
             .skip(1)
             .enumerate()
             .map(|(i, handle)| async move {
-                let typemap = handle.typemap().read().await;
-                let title = typemap
-                    .get::<SongTitleKey>()
-                    .map(clean_song_title)
-                    .unwrap_or_else(|| "Unknown".to_owned());
-                let url = typemap.get::<SongUrlKey>();
+                let data = handle.data::<TrackData>();
 
-                if let Some(url) = url {
-                    format!("{}. [{}]({})\n", i + 1, title, url)
+                if let Some(url) = &data.url {
+                    format!("{}. [{}]({})\n", i + 1, data.title, url)
                 } else {
-                    format!("{}. {}\n", i + 1, title)
+                    format!("{}. {}\n", i + 1, data.title)
                 }
             });
         for line in join_all(up_next_lines).await {
