@@ -295,17 +295,19 @@ pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     };
 
-    let call = call_lock.lock().await;
-    let Some(track) = call.queue().current() else {
-        drop(call);
-        ctx.say("No current track.").await?;
-        return Ok(());
+    let message = {
+        let call = call_lock.lock().await;
+        if let Some(track) = call.queue().current() {
+            match track.get_info().await {
+                Ok(a) => format!("Time: {:?}", a.position),
+                Err(e) => format!("Error getting info: {:?}", e),
+            }
+        } else {
+            "No current track.".to_owned()
+        }
     };
-    drop(call);
-    match track.get_info().await {
-        Ok(a) => ctx.say(format!("Time: {:?}", a.position)).await?,
-        Err(e) => ctx.say(format!("Error getting info: {:?}", e)).await?,
-    };
+
+    ctx.say(message).await?;
 
     Ok(())
 }
