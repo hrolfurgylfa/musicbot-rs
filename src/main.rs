@@ -1,93 +1,51 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    fmt::Write,
-    sync::Arc,
-    time::Duration,
-};
+use std::{env, sync::Arc};
 
-use parking_lot::{Mutex, RwLock};
+use tracing::{error, instrument};
+
 use reqwest::Client as HttpClient;
 
 use serenity::{
-    all::{ChannelId, GuildId, Http, MessageId},
-    prelude::GatewayIntents,
+    async_trait,
+    prelude::{GatewayIntents, TypeMapKey},
 };
-use songbird::SerenityInit;
+use songbird::{
+    input::YoutubeDl, tracks::Track, Event, EventContext, EventHandler as VoiceEventHandler,
+    SerenityInit, TrackEvent,
+};
 
 use tracing_appender;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer, Registry};
 
-mod config;
-use config::{load_config, Config};
+pub struct HttpKey;
 
-mod commands;
-
-mod events;
-
-mod trimmed_embed;
-
-mod typekeys;
-use typekeys::HttpKey;
-
-mod tracing_webhook;
-
-mod playlist_info;
-use playlist_info::start_queue_message_update;
-
-mod serenity_query;
-
-mod deadlock_detection;
-use deadlock_detection::start_deadlock_detection;
-
-#[derive(Debug, Clone)]
-struct TrackData {
-    title: String,
-    url: Option<String>,
-    duration: Duration,
+impl TypeMapKey for HttpKey {
+    type Value = HttpClient;
 }
 
-#[derive(Debug, Clone)]
-struct Song {
-    title: String,
-    url: Option<String>,
-}
+pub struct TrackErrorNotifier;
 
-#[derive(Debug, Clone, Copy)]
-struct MsgLocation {
-    channel_id: ChannelId,
-    message_id: MessageId,
-}
-
-impl MsgLocation {
-    pub fn new(channel_id: ChannelId, message_id: MessageId) -> Self {
-        MsgLocation {
-            channel_id,
-            message_id,
+#[async_trait]
+impl VoiceEventHandler for TrackErrorNotifier {
+    async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
+        if let EventContext::Track(track_list) = ctx {
+            for (state, handle) in *track_list {
+                tracing::error!(
+                    ?handle,
+                    ?state,
+                    "Track \"{}\" encountered an error.",
+                    handle.uuid()
+                );
+            }
         }
+
+        None
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct ServerInfo {
-    status_message: Option<MsgLocation>,
-    previous_songs: VecDeque<Song>,
-}
-
 #[derive(Debug)]
-struct Data {
-    server_info: RwLock<HashMap<GuildId, Arc<Mutex<ServerInfo>>>>,
-    commands_info: RwLock<String>,
-    config: Config,
-}
+struct Data;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Arc<Data>, Error>;
-
-async fn get_songbird_manager(ctx: Context<'_>) -> Arc<songbird::Songbird> {
-    songbird::get(ctx.serenity_context())
-        .await
-        .expect("Songbird Voice client placed in at initialisation.")
-        .clone()
-}
 
 async fn on_error(error: poise::FrameworkError<'_, Arc<Data>, Error>) {
     // This is our custom error handler
@@ -102,25 +60,15 @@ async fn on_error(error: poise::FrameworkError<'_, Arc<Data>, Error>) {
             }
         }
         error => {
-            if let Err(e) = poise::builtins::on_error(error).await {
-                tracing::error!("Error while handling error: \"{}\":", e);
-            } else {
-                tracing::error!("Unknown error in poise.");
-            }
+            tracing::error!(?error, "Unknown error: \"{:?}\":", error);
         }
     }
 }
 
 #[tokio::main]
 async fn main() {
-    let config = load_config();
-    let http = Http::new(&config.token);
-    let data = Arc::new(Data {
-        server_info: RwLock::new(HashMap::new()),
-        commands_info: RwLock::new("".to_owned()),
-        config: config.clone(),
-    });
-    let data_clone = data.clone();
+    let data = Arc::new(Data);
+    let token = env::var("TOKEN").expect("Bot token not found.");
 
     // Setup logging
     let file_appender = tracing_appender::rolling::daily("./logs", "music_bot.log");
@@ -136,21 +84,13 @@ async fn main() {
                 .with_writer(std::io::stdout)
                 .with_filter(EnvFilter::new("info,music_bot=debug,songbird=trace")),
         )
-        .with(console_subscriber::spawn())
-        .with(tracing_webhook::Layer::build(config.error_webhook, http));
+        .with(console_subscriber::spawn());
     tracing::subscriber::set_global_default(subscriber).expect("unable to set global subscriber");
 
     let options = poise::FrameworkOptions {
-        commands: vec![
-            commands::help(),
-            commands::join(),
-            commands::leave(),
-            commands::play(),
-            commands::queue(),
-            commands::skip(),
-        ],
+        commands: vec![help(), join(), leave(), play(), queue()],
         prefix_options: poise::PrefixFrameworkOptions {
-            prefix: Some(config.prefix),
+            prefix: Some("-".to_owned()),
             edit_tracker: None,
             ..Default::default()
         },
@@ -164,24 +104,6 @@ async fn main() {
                 println!("Logged in as {}", ready.user.name);
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
 
-                // Update the commands list string
-                let mut longest_commnd_len = 0;
-                for cmd in &framework.options().commands {
-                    if cmd.name.len() > longest_commnd_len {
-                        longest_commnd_len = cmd.name.len();
-                    }
-                }
-                let mut help_text = "".to_owned();
-                for cmd in &framework.options().commands {
-                    let description = cmd.description.as_deref().unwrap_or("");
-                    let padding = " ".repeat(longest_commnd_len - cmd.name.len());
-                    write!(help_text, "/{}{}  - {}\n", cmd.name, padding, description).unwrap();
-                }
-                {
-                    let mut commands_info = data.commands_info.write();
-                    *commands_info = help_text;
-                }
-
                 Ok(data)
             })
         })
@@ -191,16 +113,199 @@ async fn main() {
     let intents = GatewayIntents::non_privileged() | GatewayIntents::MESSAGE_CONTENT;
 
     let songbird = songbird::Songbird::serenity();
-    let mut client = serenity::client::Client::builder(&config.token, intents)
+    let mut client = serenity::client::Client::builder(&token, intents)
         .framework(framework)
         .type_map_insert::<HttpKey>(HttpClient::new())
         .register_songbird_with(songbird.clone())
         .await
         .unwrap();
 
-    start_queue_message_update(data_clone, songbird, (&client).into());
-
-    start_deadlock_detection();
-
     client.start().await.unwrap()
+}
+
+/// Show the help menu
+#[instrument]
+#[poise::command(prefix_command, slash_command, guild_only)]
+pub async fn help(
+    ctx: Context<'_>,
+    #[description = "Specific command to show help about"]
+    #[autocomplete = "poise::builtins::autocomplete_command"]
+    command: Option<String>,
+) -> Result<(), Error> {
+    poise::builtins::help(
+        ctx,
+        command.as_deref(),
+        poise::builtins::HelpConfiguration {
+            extra_text_at_bottom: "This is an example bot made to showcase features of my custom Discord bot framework",
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Play a song or search YouTube for a song
+#[instrument]
+#[poise::command(prefix_command, slash_command, guild_only)]
+pub async fn play(
+    ctx: Context<'_>,
+    #[description = "What to play"] play: String,
+) -> Result<(), Error> {
+    let Some(guild_id) = ctx.guild().map(|g| g.id) else {
+        ctx.say("This command is only supported in guilds.").await?;
+        return Ok(());
+    };
+
+    // Some prepwork before gathering the data
+    let do_search = !play.starts_with("http");
+    let http_client = {
+        let data = ctx.serenity_context().data.read().await;
+        data.get::<HttpKey>()
+            .cloned()
+            .expect("Guaranteed to exist in the typemap.")
+    };
+
+    // Fetch data about the selected video
+    let mut src = if do_search {
+        YoutubeDl::new_search(http_client, play.clone())
+    } else {
+        YoutubeDl::new(http_client, play.clone())
+    };
+    let mut aux_multiple = src
+        .search(Some(1))
+        .await
+        .expect("Failed to get info about song.")
+        .collect::<Vec<_>>();
+    if aux_multiple.len() == 0 {}
+    let aux = aux_multiple.swap_remove(0);
+    let title = aux.title.unwrap_or_else(|| "Unknown".to_owned());
+
+    // Add the song to the queue
+    {
+        let songbird = songbird::get(ctx.serenity_context())
+            .await
+            .expect("Songbird Voice client placed in at initialisation.")
+            .clone();
+        let Some(driver_lock) = songbird.get(guild_id) else {
+            ctx.say("Not in voice channel, can't play.").await?;
+            return Ok(());
+        };
+        let mut driver = driver_lock.lock().await;
+        let track = Track::new(src.into());
+        driver.enqueue(track).await;
+    };
+
+    ctx.say(format!("\"{}\" added to queue.", title)).await?;
+
+    Ok(())
+}
+
+/// Join a voice channel
+#[instrument]
+#[poise::command(prefix_command, slash_command, guild_only)]
+pub async fn join(
+    ctx: Context<'_>,
+    // #[description = "Choice to retrieve votes for"] voice_channel: Option<VoiceState>,
+) -> Result<(), Error> {
+    let (guild_id, channel_id) = {
+        let Some(guild) = ctx.guild() else {
+            ctx.say("This command is only supported in guilds.").await?;
+            return Ok(());
+        };
+
+        let channel_id = guild
+            .voice_states
+            .get(&ctx.author().id)
+            .and_then(|voice_state| voice_state.channel_id);
+        (guild.id, channel_id)
+    };
+
+    let connect_to = match channel_id {
+        Some(channel) => channel,
+        None => {
+            ctx.say("Not in a voice channel").await?;
+            return Ok(());
+        }
+    };
+
+    let songbird = songbird::get(ctx.serenity_context())
+        .await
+        .expect("Songbird Voice client placed in at initialisation.")
+        .clone();
+    match songbird.join(guild_id, connect_to).await {
+        Ok(handler_lock) => {
+            // Attach an event handler to see notifications of all track errors.
+            let mut handler = handler_lock.lock().await;
+            handler.add_global_event(TrackEvent::Error.into(), TrackErrorNotifier);
+        }
+        Err(e) => {
+            error!("Faield to join channel: {:?}", e);
+            ctx.say("Failed to join channel.").await?;
+            return Err(Box::new(e));
+        }
+    }
+
+    ctx.say("Ready to play").await?;
+    Ok(())
+}
+
+/// Leave the current voice channel
+#[instrument]
+#[poise::command(prefix_command, slash_command, guild_only)]
+pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
+    let Some(guild_id) = ctx.guild().map(|g| g.id) else {
+        ctx.say("This command is only supported in guilds.").await?;
+        return Ok(());
+    };
+
+    let songbird = songbird::get(ctx.serenity_context())
+        .await
+        .expect("Songbird Voice client placed in at initialisation.")
+        .clone();
+    let has_handler = songbird.get(guild_id).is_some();
+
+    if has_handler {
+        if let Err(e) = songbird.remove(guild_id).await {
+            ctx.say(format!("Failed: {:?}", e)).await?;
+        }
+
+        ctx.say("Left voice channel").await?;
+    } else {
+        ctx.say("Not in a voice channel").await?;
+    }
+
+    Ok(())
+}
+
+/// Show the current queue
+#[instrument]
+#[poise::command(prefix_command, slash_command, guild_only)]
+pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
+    let Some(guild_id) = ctx.guild().map(|g| g.id) else {
+        ctx.say("This command is only supported in guilds.").await?;
+        return Ok(());
+    };
+
+    let songbird = songbird::get(ctx.serenity_context())
+        .await
+        .expect("Songbird Voice client placed in at initialisation.")
+        .clone();
+    let Some(call_lock) = songbird.get(guild_id) else {
+        ctx.say("No call available.").await?;
+        return Ok(());
+    };
+
+    let call = call_lock.lock().await;
+    let Some(track) = call.queue().current() else {
+        drop(call);
+        ctx.say("No current track.").await?;
+        return Ok(());
+    };
+    drop(call);
+    match track.get_info().await {
+        Ok(a) => ctx.say(format!("Time: {:?}", a.position)).await?,
+        Err(e) => ctx.say(format!("Error getting info: {:?}", e)).await?,
+    };
+
+    Ok(())
 }
