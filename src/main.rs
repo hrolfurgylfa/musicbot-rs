@@ -136,8 +136,9 @@ async fn main() {
                 .with_writer(std::io::stdout)
                 .with_filter(EnvFilter::new("info,music_bot=debug,songbird=trace")),
         )
-        .with(console_subscriber::spawn())
         .with(tracing_webhook::Layer::build(config.error_webhook, http));
+    #[cfg(feature = "tokio_console")]
+    let subscriber = subscriber.with(console_subscriber::spawn());
     tracing::subscriber::set_global_default(subscriber).expect("unable to set global subscriber");
 
     let options = poise::FrameworkOptions {
