@@ -61,17 +61,23 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
+enum NowPlayingResult {
+    NotInChannel,
+    NotPlaying,
+    Playing(String),
+}
+
 #[instrument]
-async fn build_now_playing(songbird: Arc<Songbird>, guild_id: GuildId) -> String {
+async fn build_now_playing(songbird: Arc<Songbird>, guild_id: GuildId) -> NowPlayingResult {
     let Some(driver_lock) = songbird.get(guild_id) else {
-        return "### Nothing playing".to_owned();
+        return NowPlayingResult::NotInChannel;
     };
     let driver = driver_lock.lock().await;
     if driver.queue().is_empty() {
-        return "### Nothing playing".to_owned();
+        return NowPlayingResult::NotPlaying;
     }
     let Some(current) = driver.queue().current() else {
-        return "### Nothing playing".to_owned();
+        return NowPlayingResult::NotPlaying;
     };
 
     let mut str = "### Now Playing\n".to_owned();
@@ -116,7 +122,7 @@ async fn build_now_playing(songbird: Arc<Songbird>, guild_id: GuildId) -> String
         }
     }
 
-    str
+    NowPlayingResult::Playing(str)
 }
 
 async fn get_playlist_info_embeds(
@@ -124,7 +130,7 @@ async fn get_playlist_info_embeds(
     songbird: Arc<Songbird>,
     query: &SerenityQuery,
     guild_id: GuildId,
-) -> Vec<CreateEmbed> {
+) -> (Vec<CreateEmbed>, bool) {
     let server_info_lock = get_server_info(data.clone(), guild_id).await;
 
     let previously_played_text = {
@@ -134,7 +140,11 @@ async fn get_playlist_info_embeds(
         previously_played_text
     };
 
-    let now_playing_text = build_now_playing(songbird, guild_id).await;
+    let (now_playing_text, not_in_channel) = match build_now_playing(songbird, guild_id).await {
+        NowPlayingResult::NotInChannel => ("### Nothing playing".to_owned(), true),
+        NowPlayingResult::NotPlaying => ("### Nothing playing".to_owned(), false),
+        NowPlayingResult::Playing(text) => (text, false),
+    };
 
     let radio_name = query
         .get_guild_name(guild_id)
@@ -148,7 +158,7 @@ async fn get_playlist_info_embeds(
         )
     };
 
-    vec![
+    let embeds = vec![
         CreateEmbed::default()
             .description(help_text)
             .color(Color::DARK_GREEN),
@@ -158,7 +168,9 @@ async fn get_playlist_info_embeds(
         CreateEmbed::default()
             .description(now_playing_text)
             .color(Color::BLUE),
-    ]
+    ];
+
+    (embeds, not_in_channel)
 }
 
 pub async fn update_queue_messsage(
@@ -168,14 +180,15 @@ pub async fn update_queue_messsage(
     guild_id: GuildId,
     loc: MsgLocation,
 ) -> bool {
-    let embeds = get_playlist_info_embeds(data, songbird, query, guild_id).await;
+    let (embeds, not_in_channel) = get_playlist_info_embeds(data, songbird, query, guild_id).await;
 
     let res = loc
         .channel_id
         .edit_message(query, loc.message_id, EditMessage::new().embeds(embeds))
         .await;
     match res {
-        Ok(_) => true,
+        // We only want to continue if the bot is in a voice channel
+        Ok(_) => !not_in_channel,
         Err(e) => {
             warn!(?guild_id, ?loc, err = %e, "Lost track of my queue message.");
             false
@@ -187,16 +200,18 @@ pub async fn update_queue_messsage(
 pub async fn send_playlist_info(ctx: Context<'_>, guild_id: GuildId) -> Result<(), Error> {
     let songbird = get_songbird_manager(ctx).await;
     let query: SerenityQuery = (&ctx).into();
-    let embeds = get_playlist_info_embeds(ctx.data().clone(), songbird, &query, guild_id).await;
+    let (embeds, not_in_channel) =
+        get_playlist_info_embeds(ctx.data().clone(), songbird, &query, guild_id).await;
 
     let mut reply = CreateReply::default();
     reply.embeds = embeds;
     let reply_handle = send_reply(ctx, reply).await?;
 
     // Set the status message so the message gets auto updated
-    let message = reply_handle.message().await?;
-    let loc = MsgLocation::new(message.channel_id, message.id);
-    {
+    if !not_in_channel {
+        let message = reply_handle.message().await?;
+        let loc = MsgLocation::new(message.channel_id, message.id);
+
         let server_info_lock = get_server_info(ctx.data().clone(), guild_id).await;
         let mut server_info = server_info_lock.lock();
         server_info.status_message = Some(loc);
