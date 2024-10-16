@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use reqwest::Client as HttpClient;
 use serenity::prelude::TypeMapKey;
 
