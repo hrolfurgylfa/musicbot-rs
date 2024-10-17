@@ -1,4 +1,4 @@
-use std::fs;
+use core::panic;
 
 use serde::Deserialize;
 
@@ -24,6 +24,8 @@ pub fn load_config() -> Config {
     let config_str =
         fs::read_to_string("config.toml").expect("Failed to open config file at config.toml.");
 
-    toml::from_str(&config_str)
-        .expect("Failed to open config.toml, are you sure it is correct toml?")
+    match toml::from_str(&config_str) {
+        Ok(config) => config,
+        Err(err) => panic!("Failed to parse config: {}", err),
+    }
 }
