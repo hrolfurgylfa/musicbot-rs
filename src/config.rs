@@ -1,6 +1,8 @@
 use core::panic;
+use std::{collections::HashSet, fs};
 
 use serde::Deserialize;
+use serenity::all::UserId;
 
 fn default_max_previously_played() -> usize {
     5
@@ -12,12 +14,13 @@ fn default_prefix() -> String {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    #[serde(default = "default_prefix")]
-    pub prefix: String,
     pub token: String,
+    pub owners: HashSet<UserId>,
     pub error_webhook: Option<String>,
     #[serde(default = "default_max_previously_played")]
     pub max_previously_played: usize,
+    #[serde(default = "default_prefix")]
+    pub prefix: String,
 }
 
 pub fn load_config() -> Config {

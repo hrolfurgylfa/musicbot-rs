@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{process, sync::Arc, time::Duration};
 
 use songbird::{input::YoutubeDl, tracks::Track, TrackEvent};
 
@@ -214,4 +214,27 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
     ctx.say("Skipping to the next song.").await?;
 
     send_playlist_info(ctx, guild_id).await
+}
+
+/// Restarts the bot, use when it freezes
+#[instrument]
+#[poise::command(prefix_command, slash_command, guild_only)]
+pub async fn restart(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.say("Restarting...").await?;
+
+    let err = {
+        let mut args_iter = std::env::args_os().into_iter();
+        let path = args_iter
+            .next()
+            .expect("Program not run with any program arg. Cannot restart.");
+        let args: Vec<_> = args_iter.collect();
+
+        use std::os::unix::process::CommandExt;
+        let err = process::Command::new(path).args(args).exec();
+        error!(?err, "Failed to restart process: {:?}", err);
+        err
+    };
+    ctx.say(format!("Failed to restart: {}", err)).await?;
+
+    Ok(())
 }

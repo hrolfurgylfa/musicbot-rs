@@ -149,6 +149,7 @@ async fn main() {
             commands::play(),
             commands::queue(),
             commands::skip(),
+            commands::restart(),
         ],
         prefix_options: poise::PrefixFrameworkOptions {
             prefix: Some(config.prefix),
@@ -156,6 +157,7 @@ async fn main() {
             ..Default::default()
         },
         on_error: |error| Box::pin(on_error(error)),
+        owners: config.owners,
         ..Default::default()
     };
 
