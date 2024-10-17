@@ -102,11 +102,7 @@ async fn on_error(error: poise::FrameworkError<'_, Arc<Data>, Error>) {
             }
         }
         error => {
-            if let Err(e) = poise::builtins::on_error(error).await {
-                tracing::error!("Error while handling error: \"{}\":", e);
-            } else {
-                tracing::error!("Unknown error in poise.");
-            }
+            tracing::error!("Unknown error while handling command: \"{:?}\":", error);
         }
     }
 }
