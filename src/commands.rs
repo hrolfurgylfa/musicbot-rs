@@ -45,6 +45,8 @@ pub async fn play(
         return Ok(());
     };
 
+    let _defer = ctx.defer_or_broadcast().await?;
+
     // Some prepwork before gathering the data
     let do_search = !play.starts_with("http");
     let http_client = {
@@ -113,6 +115,8 @@ pub async fn join(
             .and_then(|voice_state| voice_state.channel_id);
         (guild.id, channel_id)
     };
+
+    let _defer = ctx.defer_or_broadcast().await?;
 
     let connect_to = match channel_id {
         Some(channel) => channel,
