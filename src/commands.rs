@@ -150,7 +150,7 @@ pub async fn join(
 
 /// Leave the current voice channel
 #[instrument]
-#[poise::command(prefix_command, slash_command, guild_only)]
+#[poise::command(prefix_command, slash_command, guild_only, aliases("stop"))]
 pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
     let Some(guild_id) = ctx.guild().map(|g| g.id) else {
         ctx.say("This command is only supported in guilds.").await?;
