@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use serenity::{all::GuildId, async_trait};
-use songbird::{Event, EventContext, EventHandler as VoiceEventHandler};
+use songbird::{Event, EventContext, EventHandler as VoiceEventHandler, Songbird};
+use tracing::info;
 
 use crate::{playlist_info::get_server_info, Data, Song, TrackData};
 
@@ -54,6 +55,30 @@ impl VoiceEventHandler for TrackEndNotifier {
                 }
             }
         }
+
+        None
+    }
+}
+
+pub struct TrackDisconnectNotifier {
+    songbird: Arc<Songbird>,
+    guild_id: GuildId,
+}
+
+impl TrackDisconnectNotifier {
+    pub fn new(songbird: Arc<Songbird>, guild_id: GuildId) -> Self {
+        Self { songbird, guild_id }
+    }
+}
+
+#[async_trait]
+impl VoiceEventHandler for TrackDisconnectNotifier {
+    async fn act(&self, _ctx: &EventContext<'_>) -> Option<Event> {
+        info!("Disconnected from voice channel, removing queue for guild {}", self.guild_id);
+        self.songbird
+            .remove(self.guild_id)
+            .await
+            .expect("Failed to leave voice channel on disconnect.");
 
         None
     }

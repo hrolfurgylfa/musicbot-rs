@@ -1,11 +1,11 @@
 use std::{process, sync::Arc, time::Duration};
 
-use songbird::{input::YoutubeDl, tracks::Track, TrackEvent};
+use songbird::{input::YoutubeDl, tracks::Track, CoreEvent, TrackEvent};
 
 use tracing::{error, instrument};
 
 use crate::{
-    events::{TrackEndNotifier, TrackErrorNotifier},
+    events::{TrackDisconnectNotifier, TrackEndNotifier, TrackErrorNotifier},
     get_songbird_manager,
     playlist_info::{get_server_info, send_playlist_info, update_queue_messsage},
     typekeys::HttpKey,
@@ -135,6 +135,10 @@ pub async fn join(
             handler.add_global_event(
                 TrackEvent::End.into(),
                 TrackEndNotifier::new(ctx.data().clone(), guild_id),
+            );
+            handler.add_global_event(
+                CoreEvent::DriverDisconnect.into(),
+                TrackDisconnectNotifier::new(manager.clone(), guild_id),
             );
         }
         Err(e) => {
