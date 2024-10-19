@@ -2,14 +2,14 @@ use std::thread;
 use std::time::Duration;
 
 use parking_lot::deadlock;
-use tracing::{debug, error};
+use tracing::{error, trace};
 
 pub fn start_deadlock_detection() {
     // Create a background thread which checks for deadlocks every 10s
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(10));
         let deadlocks = deadlock::check_deadlock();
-        debug!("Checking for deadlocks...");
+        trace!("Checking for deadlocks...");
         if deadlocks.is_empty() {
             continue;
         }
