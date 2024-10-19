@@ -1477,6 +1477,7 @@ dependencies = [
  "poise",
  "reqwest 0.12.8",
  "serde",
+ "serde_json",
  "serenity",
  "songbird",
  "symphonia",
