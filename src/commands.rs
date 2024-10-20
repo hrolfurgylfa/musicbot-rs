@@ -72,10 +72,16 @@ async fn get_multiple_tracks(client: reqwest::Client, url: &str) -> Result<Vec<T
         .await
         .expect("Could not find yt-dlp on path");
     if !output.status.success() {
-        panic!(
-            "yt-dlp failed with non-zero status code: {}",
-            std::str::from_utf8(&output.stderr[..]).unwrap_or("<no error message>")
-        );
+        // This could have been a 404, or something else.
+        let dlp_msg = std::str::from_utf8(&output.stderr[..]).unwrap_or("<no error message>");
+        if dlp_msg.contains("Playlists that require authentication")
+            && dlp_msg.contains("404: Not Found")
+        {
+            warn!("yt-dlp failed with non-zero status code: {}", dlp_msg);
+            return Err("Are you sure the provided playlist is public or unlisted? I can't play private playlists.".to_owned());
+        } else {
+            panic!("yt-dlp failed with non-zero status code: {}", dlp_msg);
+        }
     }
     let out = output
         .stdout
