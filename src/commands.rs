@@ -4,7 +4,7 @@ use serde::Deserialize;
 use songbird::{input::YoutubeDl, tracks::Track, CoreEvent, TrackEvent};
 
 use tokio::process::Command as TokioCommand;
-use tracing::{error, instrument};
+use tracing::{error, instrument, warn};
 
 use crate::{
     events::{TrackDisconnectNotifier, TrackEndNotifier, TrackErrorNotifier},
@@ -63,7 +63,7 @@ struct YtDlpFlatPlaylistOutput {
     duration: f32,
 }
 
-async fn get_multiple_tracks(client: reqwest::Client, url: &str) -> Vec<Track> {
+async fn get_multiple_tracks(client: reqwest::Client, url: &str) -> Result<Vec<Track>, String> {
     let output = TokioCommand::new("yt-dlp")
         .arg("-j")
         .arg(&url)
@@ -84,7 +84,10 @@ async fn get_multiple_tracks(client: reqwest::Client, url: &str) -> Vec<Track> {
         .take(50)
         .map(serde_json::from_slice)
         .collect::<Result<Vec<YtDlpFlatPlaylistOutput>, _>>()
-        .expect("Failed to parse yt-dlp playlist output.")
+        .map_err(|e| {
+            warn!("Failed to parse playlist: {:?}", e);
+            "Failed to request playlist, are you sure what you provided is a playlist?".to_owned()
+        })?
         .into_iter()
         .map(|output| {
             Track::new_with_data(
@@ -98,7 +101,7 @@ async fn get_multiple_tracks(client: reqwest::Client, url: &str) -> Vec<Track> {
         })
         .collect::<Vec<Track>>();
 
-    out
+    Ok(out)
 }
 
 /// Play a song or search YouTube for a song
@@ -139,7 +142,13 @@ pub async fn play(
         vec![get_single_track(src).await]
     } else {
         if playlist {
-            get_multiple_tracks(http_client, &play).await
+            match get_multiple_tracks(http_client, &play).await {
+                Ok(ok) => ok,
+                Err(err) => {
+                    ctx.say(err).await?;
+                    return Ok(());
+                }
+            }
         } else {
             let src = YoutubeDl::new(http_client, play);
             vec![get_single_track(src).await]
