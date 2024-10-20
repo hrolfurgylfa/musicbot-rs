@@ -60,7 +60,7 @@ async fn get_single_track<'a>(mut src: YoutubeDl<'static>) -> Track {
 struct YtDlpFlatPlaylistOutput {
     title: String,
     url: String,
-    duration: f32,
+    duration: Option<f32>,
 }
 
 async fn get_multiple_tracks(client: reqwest::Client, url: &str) -> Result<Vec<Track>, String> {
@@ -89,12 +89,15 @@ async fn get_multiple_tracks(client: reqwest::Client, url: &str) -> Result<Vec<T
             "Failed to request playlist, are you sure what you provided is a playlist?".to_owned()
         })?
         .into_iter()
+        // Skip any videos with null duration, they are privated.
+        .filter(|o| o.duration.is_some())
         .map(|output| {
             Track::new_with_data(
                 YoutubeDl::new(client.clone(), output.url.clone()).into(),
                 Arc::new(TrackData {
                     title: output.title,
-                    duration: Duration::from_secs_f32(output.duration),
+                    // We filtered duration None out earlier, it is safe to unwrap
+                    duration: Duration::from_secs_f32(output.duration.unwrap()),
                     url: Some(output.url.clone()),
                 }),
             )
