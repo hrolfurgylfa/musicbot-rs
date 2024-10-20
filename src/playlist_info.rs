@@ -164,10 +164,14 @@ async fn get_playlist_info_embeds(
             .description(help_text)
             .color(Color::DARK_GREEN),
         TrimmedEmbed::new()
+            .too_big_msg("...")
+            .truncate_description_newline()
             .description(previously_played_text)
             .color(Color::DARK_PURPLE)
             .into(),
         TrimmedEmbed::new()
+            .too_big_msg("...")
+            .truncate_description_newline()
             .description(now_playing_text)
             .color(Color::BLUE)
             .into(),
