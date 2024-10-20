@@ -12,6 +12,7 @@ use tokio::time::{self, Instant};
 use tracing::{instrument, warn};
 
 use crate::serenity_query::SerenityQuery;
+use crate::trimmed_embed::TrimmedEmbed;
 use crate::{get_songbird_manager, Context, Data, Error, ServerInfo, Song};
 use crate::{MsgLocation, TrackData};
 
@@ -162,12 +163,14 @@ async fn get_playlist_info_embeds(
         CreateEmbed::default()
             .description(help_text)
             .color(Color::DARK_GREEN),
-        CreateEmbed::default()
+        TrimmedEmbed::new()
             .description(previously_played_text)
-            .color(Color::DARK_PURPLE),
-        CreateEmbed::default()
+            .color(Color::DARK_PURPLE)
+            .into(),
+        TrimmedEmbed::new()
             .description(now_playing_text)
-            .color(Color::BLUE),
+            .color(Color::BLUE)
+            .into(),
     ];
 
     (embeds, not_in_channel)
