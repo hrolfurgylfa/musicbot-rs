@@ -1,4 +1,5 @@
 use std::fmt::Write;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,8 +9,8 @@ use serenity::{all::GuildId, futures::future::join_all};
 use songbird::Songbird;
 
 use parking_lot::Mutex;
-use tokio::time::{self, Instant};
-use tracing::{instrument, warn};
+use tokio::time::{self, sleep, Instant};
+use tracing::{error, instrument, trace, warn};
 
 use crate::serenity_query::SerenityQuery;
 use crate::trimmed_embed::{Size, TrimmedEmbed};
@@ -68,6 +69,24 @@ enum NowPlayingResult {
     Playing(String),
 }
 
+/// Try calling a function that likes hanging forever.
+///
+/// Tries 3 times and gives it 1 second each time, retunrs None if all 3 attempts hang.
+async fn try_call_hanging<T, F, Ft>(func: F) -> Option<T>
+where
+    F: Fn() -> Ft,
+    Ft: Future<Output = T>,
+{
+    for _ in 0..3 {
+        tokio::select! {
+            track_state = func() => {return Some(track_state);}
+            _ = sleep(Duration::from_secs(1)) => {}
+        }
+    }
+
+    None
+}
+
 #[instrument]
 async fn build_now_playing(songbird: Arc<Songbird>, guild_id: GuildId) -> NowPlayingResult {
     let Some(driver_lock) = songbird.get(guild_id) else {
@@ -85,13 +104,15 @@ async fn build_now_playing(songbird: Arc<Songbird>, guild_id: GuildId) -> NowPla
     {
         let data = current.data::<TrackData>();
         let length = format_duration(data.duration);
-        let pos = {
-            let state = current
+        let state = try_call_hanging(|| async {
+            current
                 .get_info()
                 .await
-                .expect("Failed to get track state.");
-            format_duration(state.position)
-        };
+                .expect("Failed to get track state.")
+        })
+        .await
+        .expect("Failed to call get_info");
+        let pos = { format_duration(state.position) };
 
         if let Some(url) = &data.url {
             write!(str, "[{}]({})\n[ {} / {} ]\n", data.title, url, pos, length).unwrap();
@@ -126,6 +147,7 @@ async fn build_now_playing(songbird: Arc<Songbird>, guild_id: GuildId) -> NowPla
     NowPlayingResult::Playing(str)
 }
 
+#[instrument(skip(songbird, query))]
 async fn get_playlist_info_embeds(
     data: Arc<Data>,
     songbird: Arc<Songbird>,
@@ -228,39 +250,60 @@ pub async fn send_playlist_info(ctx: Context<'_>, guild_id: GuildId) -> Result<(
     Ok(())
 }
 
+async fn run_message_updates(data: &Arc<Data>, songbird: &Arc<Songbird>, query: &SerenityQuery) {
+    let to_update = {
+        let server_infos = data.server_info.read();
+        let mut to_update = Vec::with_capacity(server_infos.len());
+        for (guild_id, server_info_lock) in server_infos.iter() {
+            let server_info = server_info_lock.lock();
+            if let Some(status_msg) = server_info.status_message {
+                to_update.push((*guild_id, status_msg, server_info_lock.clone()));
+            }
+        }
+        to_update
+    };
+    let to_update_str = if to_update.len() > 0 {
+        let mut guild_ids_str = String::with_capacity(100);
+        for (guild_id, _, _) in to_update.iter() {
+            write!(guild_ids_str, "{}, ", guild_id).unwrap();
+        }
+        guild_ids_str.truncate(guild_ids_str.len() - 2);
+        guild_ids_str
+    } else {
+        "".to_owned()
+    };
+    trace!("Updating queue message for guilds: [{}]", to_update_str);
+    for (guild_id, status_msg_loc, server_info_lock) in to_update {
+        let success = update_queue_messsage(
+            data.clone(),
+            songbird.clone(),
+            &query,
+            guild_id,
+            status_msg_loc,
+        )
+        .await;
+        if !success {
+            let mut server_info = server_info_lock.lock();
+            server_info.status_message = None;
+        }
+    }
+}
+
 pub fn start_queue_message_update(data: Arc<Data>, songbird: Arc<Songbird>, query: SerenityQuery) {
     tokio::spawn(async move {
         loop {
             let start = Instant::now();
-            {
-                let to_update = {
-                    let server_infos = data.server_info.read();
-                    let mut to_update = Vec::with_capacity(server_infos.len());
-                    for (guild_id, server_info_lock) in server_infos.iter() {
-                        let server_info = server_info_lock.lock();
-                        if let Some(status_msg) = server_info.status_message {
-                            to_update.push((*guild_id, status_msg, server_info_lock.clone()));
-                        }
-                    }
-                    to_update
-                };
-                for (guild_id, status_msg_loc, server_info_lock) in to_update {
-                    let success = update_queue_messsage(
-                        data.clone(),
-                        songbird.clone(),
-                        &query,
-                        guild_id,
-                        status_msg_loc,
-                    )
-                    .await;
-                    if !success {
-                        let mut server_info = server_info_lock.lock();
-                        server_info.status_message = None;
-                    }
+            tokio::select! {
+                _ = run_message_updates(&data, &songbird, &query) => {}
+                _ = sleep(Duration::from_secs(5)) => {
+                    error!("run_message_updates took more than 5 seconds. Cancelling and trying again.");
                 }
             }
+
             let end = Instant::now();
-            let sleep_time = Duration::from_secs(2) - (end - start);
+            let sleep_time = Duration::from_secs(2)
+                .saturating_sub(end - start)
+                .min(Duration::from_millis(1500));
             time::sleep(sleep_time).await;
         }
     });
