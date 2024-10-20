@@ -293,11 +293,15 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
         ctx.say("No playing anything, can't skip.").await?;
         return Ok(());
     };
-    let driver = driver_lock.lock().await;
-    driver.queue().skip()?;
+    {
+        let driver = driver_lock.lock().await;
+        driver.queue().skip()?;
+    }
     ctx.say("Skipping to the next song.").await?;
 
-    send_playlist_info(ctx, guild_id).await
+    send_playlist_info(ctx, guild_id).await?;
+
+    Ok(())
 }
 
 /// Restarts the bot, use when it freezes
