@@ -12,7 +12,7 @@ use tokio::time::{self, Instant};
 use tracing::{instrument, warn};
 
 use crate::serenity_query::SerenityQuery;
-use crate::trimmed_embed::TrimmedEmbed;
+use crate::trimmed_embed::{Size, TrimmedEmbed};
 use crate::{get_songbird_manager, Context, Data, Error, ServerInfo, Song};
 use crate::{MsgLocation, TrackData};
 
@@ -159,17 +159,19 @@ async fn get_playlist_info_embeds(
         )
     };
 
+    let mut size = Size::new();
     let embeds = vec![
-        CreateEmbed::default()
+        TrimmedEmbed::new(&mut size)
             .description(help_text)
-            .color(Color::DARK_GREEN),
-        TrimmedEmbed::new()
+            .color(Color::DARK_GREEN)
+            .into(),
+        TrimmedEmbed::new(&mut size)
             .too_big_msg("...")
             .truncate_description_newline()
             .description(previously_played_text)
             .color(Color::DARK_PURPLE)
             .into(),
-        TrimmedEmbed::new()
+        TrimmedEmbed::new(&mut size)
             .too_big_msg("...")
             .truncate_description_newline()
             .description(now_playing_text)

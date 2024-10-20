@@ -1,7 +1,7 @@
-use core::panic;
 use std::{borrow::Cow, fmt::Write};
 
 use serenity::all::{Colour, CreateEmbed, Embed, EmbedField, EmbedFooter, Timestamp};
+use tracing::warn;
 
 fn truncate_string_backwards(
     s: &mut String,
@@ -10,7 +10,9 @@ fn truncate_string_backwards(
     continue_: impl Fn(&str, usize) -> bool,
 ) {
     if max_len < trim_str.len() {
-        panic!("Can't fit {:?} into the max_len.", trim_str);
+        warn!("Can't fit {:?} into the max_len.", trim_str);
+        *s = "".to_owned();
+        return;
     }
     if max_len >= s.len() {
         return;
@@ -33,21 +35,49 @@ pub fn truncate_string_to_newline_boundary(s: &mut String, max_len: usize) {
     });
 }
 
-pub struct TrimmedEmbed {
+const EMBED_MAX_SIZE: usize = 6000;
+
+#[derive(Clone, Debug)]
+pub struct Size(usize);
+
+impl Size {
+    pub fn new() -> Self {
+        Self(0)
+    }
+
+    fn value(&self) -> usize {
+        self.0
+    }
+
+    /// Tries to add a value and returns true if it fit within the EMBED_MAX_SIZE
+    fn add(&mut self, val: usize, buffer: usize) -> bool {
+        let new_val = self.0 + val;
+        if new_val <= EMBED_MAX_SIZE - buffer {
+            self.0 = new_val;
+            return true;
+        } else {
+            return false;
+        }
+    }
+}
+
+pub struct TrimmedEmbed<'a> {
     too_big_msg: Cow<'static, str>,
     truncate_description_newline: bool,
+    size: &'a mut Size,
 }
 
 #[allow(dead_code)]
-impl TrimmedEmbed {
-    fn make_builder(self) -> TrimmedEmbedBuilder {
+impl<'a> TrimmedEmbed<'a> {
+    fn make_builder(self) -> TrimmedEmbedBuilder<'a> {
         TrimmedEmbedBuilder::new(self)
     }
 
-    pub fn new() -> Self {
+    pub fn new(size: &'a mut Size) -> Self {
         Self {
             too_big_msg: Cow::Borrowed("Too much data, some fields have been skipped."),
             truncate_description_newline: false,
+            size,
         }
     }
     pub fn too_big_msg(mut self, s: impl Into<Cow<'static, str>>) -> Self {
@@ -60,16 +90,16 @@ impl TrimmedEmbed {
         self
     }
 
-    pub fn title(self, s: impl Into<String>) -> TrimmedEmbedBuilder {
+    pub fn title(self, s: impl Into<String>) -> TrimmedEmbedBuilder<'a> {
         self.make_builder().title(s)
     }
-    pub fn description(self, s: impl Into<String>) -> TrimmedEmbedBuilder {
+    pub fn description(self, s: impl Into<String>) -> TrimmedEmbedBuilder<'a> {
         self.make_builder().description(s)
     }
     pub fn fields(
         self,
         fields: impl IntoIterator<Item = (impl Into<String>, impl Into<String>, bool)>,
-    ) -> TrimmedEmbedBuilder {
+    ) -> TrimmedEmbedBuilder<'a> {
         self.make_builder().fields(fields)
     }
     pub fn field(
@@ -77,32 +107,28 @@ impl TrimmedEmbed {
         name: impl Into<String>,
         value: impl Into<String>,
         inline: bool,
-    ) -> TrimmedEmbedBuilder {
+    ) -> TrimmedEmbedBuilder<'a> {
         self.make_builder().field(name, value, inline)
     }
 
-    pub fn timestamp(self, timestamp: Timestamp) -> TrimmedEmbedBuilder {
+    pub fn timestamp(self, timestamp: Timestamp) -> TrimmedEmbedBuilder<'a> {
         self.make_builder().timestamp(timestamp)
     }
-    pub fn colour(self, colour: Colour) -> TrimmedEmbedBuilder {
+    pub fn colour(self, colour: Colour) -> TrimmedEmbedBuilder<'a> {
         self.make_builder().colour(colour)
     }
-    pub fn color(self, color: Colour) -> TrimmedEmbedBuilder {
+    pub fn color(self, color: Colour) -> TrimmedEmbedBuilder<'a> {
         self.make_builder().color(color)
     }
 }
 
-pub struct TrimmedEmbedBuilder {
+pub struct TrimmedEmbedBuilder<'a> {
     embed: Embed,
-    size: usize,
     overflowed: bool,
-    builder: TrimmedEmbed,
+    builder: TrimmedEmbed<'a>,
 }
 
-impl TrimmedEmbedBuilder {
-    fn max_length(&self) -> usize {
-        6000 - self.too_big_msg_length()
-    }
+impl<'a> TrimmedEmbedBuilder<'a> {
     fn too_big_msg_length(&self) -> usize {
         let msg_len = self.builder.too_big_msg.len();
         if msg_len == 0 {
@@ -112,10 +138,9 @@ impl TrimmedEmbedBuilder {
         }
     }
 
-    fn new(builder: TrimmedEmbed) -> Self {
+    fn new(builder: TrimmedEmbed<'a>) -> Self {
         Self {
             embed: Embed::default(),
-            size: 0,
             builder,
             overflowed: false,
         }
@@ -123,9 +148,8 @@ impl TrimmedEmbedBuilder {
     pub fn title(mut self, s: impl Into<String>) -> Self {
         let mut s = s.into();
         truncate_string_to_char_boundary(&mut s, 256);
-        let new_size = self.size + s.len();
-        if new_size <= self.max_length() {
-            self.size = new_size;
+
+        if self.builder.size.add(s.len(), self.too_big_msg_length()) {
             self.embed.title = Some(s);
         } else {
             self.overflowed = true;
@@ -135,13 +159,11 @@ impl TrimmedEmbedBuilder {
     pub fn description(mut self, s: impl Into<String>) -> Self {
         let mut s = s.into();
         if self.builder.truncate_description_newline {
-            truncate_string_to_newline_boundary(&mut s, 2048);
+            truncate_string_to_newline_boundary(&mut s, 4096.max(self.builder.size.value()));
         } else {
-            truncate_string_to_char_boundary(&mut s, 2048);
+            truncate_string_to_char_boundary(&mut s, 4096.max(self.builder.size.value()));
         }
-        let new_size = self.size + s.len();
-        if new_size <= self.max_length() {
-            self.size = new_size;
+        if self.builder.size.add(s.len(), self.too_big_msg_length()) {
             self.embed.description = Some(s);
         } else {
             self.overflowed = true;
@@ -156,9 +178,11 @@ impl TrimmedEmbedBuilder {
             let (mut name, mut value): (String, String) = (name.into(), value.into());
             truncate_string_to_char_boundary(&mut name, 256);
             truncate_string_to_char_boundary(&mut value, 1024);
-            let new_size = self.size + name.len() + value.len();
-            if new_size <= self.max_length() {
-                self.size = new_size;
+            if self
+                .builder
+                .size
+                .add(name.len() + value.len(), self.too_big_msg_length())
+            {
                 self.embed.fields.push(EmbedField::new(name, value, inline));
             } else {
                 self.overflowed = true;
@@ -191,19 +215,19 @@ fn create_embed_footer(text: &str) -> EmbedFooter {
     toml::from_str::<EmbedFooter>(&toml_str).unwrap()
 }
 
-impl Into<Embed> for TrimmedEmbed {
+impl Into<Embed> for TrimmedEmbed<'_> {
     fn into(self) -> Embed {
         self.make_builder().into()
     }
 }
 
-impl Into<CreateEmbed> for TrimmedEmbed {
+impl Into<CreateEmbed> for TrimmedEmbed<'_> {
     fn into(self) -> CreateEmbed {
         self.make_builder().into()
     }
 }
 
-impl Into<Embed> for TrimmedEmbedBuilder {
+impl Into<Embed> for TrimmedEmbedBuilder<'_> {
     fn into(mut self) -> Embed {
         if !self.overflowed {
             return self.embed;
@@ -219,7 +243,7 @@ impl Into<Embed> for TrimmedEmbedBuilder {
     }
 }
 
-impl Into<CreateEmbed> for TrimmedEmbedBuilder {
+impl Into<CreateEmbed> for TrimmedEmbedBuilder<'_> {
     fn into(self) -> CreateEmbed {
         let embed: Embed = self.into();
         embed.into()

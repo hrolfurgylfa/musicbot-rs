@@ -8,6 +8,7 @@ use tracing::Level;
 use tracing::Subscriber;
 use tracing_subscriber::Layer as TracingLayer;
 
+use crate::trimmed_embed::Size;
 use crate::trimmed_embed::TrimmedEmbed;
 
 use super::visitor;
@@ -125,7 +126,8 @@ where
         let mut visitor = visitor::EmbedFieldVisitor::default();
         event.record(&mut visitor);
 
-        let embed = TrimmedEmbed::new()
+        let mut size = Size::new();
+        let embed = TrimmedEmbed::new(&mut size)
             .title(level.to_string().to_uppercase())
             .description(visitor.message.unwrap_or_else(|| "No message".to_owned()))
             .timestamp(Timestamp::now())
