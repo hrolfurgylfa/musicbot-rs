@@ -92,16 +92,18 @@ async fn build_now_playing(songbird: Arc<Songbird>, guild_id: GuildId) -> NowPla
     let Some(driver_lock) = songbird.get(guild_id) else {
         return NowPlayingResult::NotInChannel;
     };
-    let driver = driver_lock.lock().await;
-    if driver.queue().is_empty() {
-        return NowPlayingResult::NotPlaying;
-    }
-    let Some(current) = driver.queue().current() else {
-        return NowPlayingResult::NotPlaying;
-    };
-
     let mut str = "### Now Playing\n".to_owned();
     {
+        let current = {
+            let driver = driver_lock.lock().await;
+            if driver.queue().is_empty() {
+                return NowPlayingResult::NotPlaying;
+            }
+            let Some(current) = driver.queue().current() else {
+                return NowPlayingResult::NotPlaying;
+            };
+            current
+        };
         let data = current.data::<TrackData>();
         let length = format_duration(data.duration);
         let state = try_call_hanging(|| async {
@@ -122,7 +124,13 @@ async fn build_now_playing(songbird: Arc<Songbird>, guild_id: GuildId) -> NowPla
     }
 
     {
-        let queue = driver.queue().current_queue();
+        let queue = {
+            let driver = driver_lock.lock().await;
+            if driver.queue().is_empty() {
+                return NowPlayingResult::NotPlaying;
+            }
+            driver.queue().current_queue()
+        };
         if queue.len() > 1 {
             str += "\n### Up Next:\n";
         }
