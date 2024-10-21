@@ -210,7 +210,7 @@ impl<'a> TrimmedEmbedBuilder<'a> {
 
 /// This is so cursed, why can't I just call EmbedFooter::new()?
 fn create_embed_footer(text: &str) -> EmbedFooter {
-    let toml = toml::toml! {name = text};
+    let toml = toml::toml! {text = text};
     let toml_str = toml::to_string(&toml).unwrap();
     toml::from_str::<EmbedFooter>(&toml_str).unwrap()
 }
@@ -290,4 +290,103 @@ mod tests {
         full_string_fits: ("abcd\nabcdef", 11, "abcd\nabcdef"),
         more_than_string_fits: ("abcd\nabcdef", 15, "abcd\nabcdef"),
     );
+
+    #[allow(unused)]
+    #[derive(Clone, Debug)]
+    enum EmbedTooLarge {
+        Sum(usize),
+        Single(usize, SpecificEmbed),
+    }
+    #[allow(unused)]
+    #[derive(Clone, Debug)]
+    enum SpecificEmbed {
+        Title(usize),
+        Description(usize),
+        AuthorName(usize),
+        FooterText(usize),
+        Field(usize, SpecificField),
+        FieldCount(usize),
+    }
+    #[allow(unused)]
+    #[derive(Clone, Debug)]
+    enum SpecificField {
+        Name(usize),
+        Value(usize),
+    }
+
+    macro_rules! _check_embed_item_length {
+        ($item:ident,$i:ident,$sum_all:ident,$count:ident,$max_length:ident,$error_func:ident) => {
+            $sum_all = $sum_all.saturating_add($count);
+            if $count > $max_length {
+                return Err(EmbedTooLarge::Single($i, $error_func($count)));
+            }
+        };
+    }
+
+    macro_rules! check_embed_item_length {
+        ($item:ident,$i:ident,$sum_all:ident,$field:ident?$(.$inner_field:ident)?,$max_length:literal,$error:expr) => {
+            let count = $item.$field.as_ref().map(|f| f$(.$inner_field)*.trim().len()).unwrap_or(0);
+            let max_length = $max_length;
+            let error_func = $error;
+            _check_embed_item_length!($item, $i, $sum_all, count, max_length, error_func);
+        };
+        ($item:ident,$i:ident,$sum_all:ident,$field:ident$(.$inner_field:ident)?,$max_length:literal,$error:expr) => {
+            let count = $item.$field$(.$inner_field)*.trim().len();
+            let max_length = $max_length;
+            let error_func = $error;
+            _check_embed_item_length!($item, $i, $sum_all, count, max_length, error_func);
+        }
+    }
+
+    /// Check if the embed is too large
+    ///
+    /// Uses the following for size info: https://discord.com/developers/docs/resources/message#embed-object-embed-limits
+    #[rustfmt::skip]
+    fn check_embed_lengths<'a>(
+        embeds: impl Iterator<Item = &'a Embed>,
+    ) -> Result<(), EmbedTooLarge> {
+        let mut sum_all: usize = 0;
+        for (i, embed) in embeds.enumerate() {
+            check_embed_item_length!(embed, i, sum_all, title?, 256, |i| SpecificEmbed::Title(i));
+            check_embed_item_length!(embed, i, sum_all, description?, 4096, |i| SpecificEmbed::Description(i));
+            check_embed_item_length!(embed, i, sum_all, footer?.text, 2048, |i| SpecificEmbed::FooterText(i));
+            check_embed_item_length!(embed, i, sum_all, author?.name, 256, |i| SpecificEmbed::AuthorName(i));
+            for (j, field) in embed.fields.iter().enumerate() {
+                check_embed_item_length!(field, i, sum_all, name, 256, |i| SpecificEmbed::Field(j, SpecificField::Name(i)));
+                check_embed_item_length!(field, i, sum_all, value, 1024, |i| SpecificEmbed::Field(j, SpecificField::Value(i)));
+            }
+            if embed.fields.len() > 25 {
+                return Err(EmbedTooLarge::Single(i, SpecificEmbed::FieldCount(embed.fields.len())));
+            }
+        }
+
+        if sum_all > 6000 {
+            Err(EmbedTooLarge::Sum(sum_all))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn truncate_max_size_embeds() {
+        let mut size = Size::new();
+        let (e1, e2, e3): (Embed, Embed, Embed) = (
+            TrimmedEmbed::new(&mut size)
+                .too_big_msg("")
+                .description("-".repeat(1000))
+                .into(),
+            TrimmedEmbed::new(&mut size)
+                .too_big_msg("")
+                .description("-".repeat(1000))
+                .into(),
+            TrimmedEmbed::new(&mut size)
+                .too_big_msg("")
+                .description("-".repeat(4000))
+                .into(),
+        );
+        assert_eq!(e1.description, Some("-".repeat(1000)));
+        assert_eq!(e2.description, Some("-".repeat(1000)));
+        assert_eq!(e3.description, Some("-".repeat(4000)));
+        check_embed_lengths([e1, e2, e3].iter()).unwrap();
+    }
 }
