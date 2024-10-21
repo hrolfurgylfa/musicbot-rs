@@ -1,4 +1,4 @@
-use std::{fmt::Write, process, sync::Arc, time::Duration};
+use std::{process, sync::Arc, time::Duration};
 
 use serde::Deserialize;
 use songbird::{input::YoutubeDl, tracks::Track, CoreEvent, TrackEvent};
@@ -177,15 +177,12 @@ pub async fn play(
     }
 
     // Make the list of songs added for discord
-    let mut songs_added_str = format!("\"{}\"", songs_added[0]);
-    if songs_added.len() > 1 {
-        for title in songs_added.iter().skip(1).take(songs_added.len() - 2) {
-            write!(songs_added_str, ", \"{}\"", title).unwrap();
-        }
-        write!(songs_added_str, " and \"{}\"", songs_added.last().unwrap()).unwrap();
-    }
-    ctx.say(format!("{} added to queue.", songs_added_str))
-        .await?;
+    let songs_added_msg = if songs_added.len() == 1 {
+        format!("\"{}\" added to queue.", songs_added[0])
+    } else {
+        "Multiple songs added to queue.".to_owned()
+    };
+    ctx.say(songs_added_msg).await?;
 
     send_playlist_info(ctx, guild_id).await
 }
